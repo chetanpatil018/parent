@@ -31,6 +31,8 @@ jobs:
 
       - name: Create Release Branch in GitHub POC
         run: |
+          # Move to the child directory before creating the branch
+          cd child
           # Create a release branch in GitHub POC matching the parent branch name
           PARENT_BRANCH=${GITHUB_REF#refs/heads/}
           git checkout -b $PARENT_BRANCH
@@ -38,15 +40,19 @@ jobs:
 
       - name: Update Parent Version in GitHub POC POM
         run: |
+          cd child
           # Update the parent version in GitHub POC's pom.xml
-          sed -i "s/<parent.version>.*<\/parent.version>/<parent.version>$VERSION<\/parent.version>/g" pom.xml
+          sed -i "s|<version>[^<]*</version>|<version>$VERSION</version>|g" pom.xml
+          cat pom.xml  # Output the file content for debugging purposes
           echo "Updated parent version to $VERSION in GitHub POC's pom.xml"
 
       - name: Commit and Push Changes to GitHub POC
         run: |
+          # Move to the child directory to commit and push changes
+          cd child
           git config --local user.email "github-actions[bot]@users.noreply.github.com"
           git config --local user.name "GitHub Actions"
-          git add pom.xml
+          git add pom.xml  # Ensure only pom.xml is tracked
           git commit -m "Updated parent version to $VERSION"
           # Use the personal access token for authentication
           git push https://x-access-token:${{ secrets.GH_PAT }}@github.com/chetanpatil018/child.git $PARENT_BRANCH
