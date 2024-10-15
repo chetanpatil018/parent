@@ -48,5 +48,5 @@ jobs:
           git config --local user.name "GitHub Actions"
           git add pom.xml
           git commit -m "Updated parent version to $VERSION"
-          # Use the token for authentication to push
-          git push https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/chetanpatil018/child.git $PARENT_BRANCH
+          # Use the personal access token for authentication
+          git push https://x-access-token:${{ secrets.GH_PAT }}@github.com/chetanpatil018/child.git $PARENT_BRANCH
