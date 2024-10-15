@@ -42,7 +42,7 @@ jobs:
         run: |
           cd child
           # Update the parent version in GitHub POC's pom.xml
-          sed -i "s|<version>[^<]*</version>|<version>$VERSION</version>|g" pom.xml
+          sed -i "/<parent>/,/<\/parent>/ s|<version>[^<]*</version>|<version>$VERSION</version>|g" pom.xml
           cat pom.xml  # Output the file content for debugging purposes
           echo "Updated parent version to $VERSION in GitHub POC's pom.xml"
 
