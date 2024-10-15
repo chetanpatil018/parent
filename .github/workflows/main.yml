@@ -25,9 +25,9 @@ jobs:
 
       - name: Clone GitHub POC Repository
         run: |
-          # Clone the GitHub POC repository
-          git clone https://github.com/chetanpatil018/child.git
-          cd child
+          git clone https://x-access-token:${{ secrets.GH_PAT }}@github.com/chetanpatil018/child.git
+        env:
+          GH_PAT: ${{ secrets.GH_PAT }}
 
       - name: Create Release Branch in GitHub POC
         run: |
