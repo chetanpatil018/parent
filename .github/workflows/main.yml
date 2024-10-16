@@ -1,10 +1,10 @@
-name: Sync Parent Version with GitHub POC
+name: Sync Parent Version with GitHub POCs
 
 # Trigger on push to any release/* branch in the parent repo, when the pom.xml is updated.
 on:
   push:
     paths:
-      - 'pom.xml'  # This ensures it runs when you push an update to the pom.xml
+      - 'pom.xml'  # Ensure it runs when pom.xml is updated
     branches:
       - release/*  # Only trigger on release branches
 
@@ -23,36 +23,45 @@ jobs:
           echo "VERSION=$VERSION" >> $GITHUB_ENV
           echo "Version extracted from parent pom.xml: $VERSION"
 
-      - name: Clone GitHub POC Repository
+      # Define multiple child repositories
+      - name: Update GitHub POC Repositories
         run: |
-          git clone https://x-access-token:${{ secrets.GH_PAT }}@github.com/chetanpatil018/child.git
+          REPOS=(
+            "chetanpatil018/child"
+            "chetanpatil018/child1"
+          )
+          
+          PARENT_BRANCH=${GITHUB_REF#refs/heads/}
+          
+          for REPO in "${REPOS[@]}"; do
+            echo "Processing $REPO..."
+            
+            # Clone the child repository
+            git clone https://x-access-token:${{ secrets.GH_PAT }}@github.com/$REPO.git
+            cd $(basename "$REPO")
+            
+            # Check if the release branch exists
+            if git show-ref --verify --quiet refs/heads/$PARENT_BRANCH; then
+              echo "Branch $PARENT_BRANCH already exists. Pulling latest changes..."
+              git checkout $PARENT_BRANCH
+              git pull origin $PARENT_BRANCH
+            else
+              echo "Creating new branch $PARENT_BRANCH"
+              git checkout -b $PARENT_BRANCH
+            fi
+            
+            # Update the parent version in the child’s pom.xml
+            sed -i "/<parent>/,/<\/parent>/ s|<version>[^<]*</version>|<version>$VERSION</version>|g" pom.xml
+            
+            # Commit and push changes
+            git config --local user.email "github-actions[bot]@users.noreply.github.com"
+            git config --local user.name "GitHub Actions"
+            git add pom.xml
+            git commit -m "Updated parent version to $VERSION"
+            git push https://x-access-token:${{ secrets.GH_PAT }}@github.com/$REPO.git $PARENT_BRANCH
+            
+            # Move back to the root directory
+            cd ..
+          done
         env:
           GH_PAT: ${{ secrets.GH_PAT }}
-
-      - name: Create Release Branch in GitHub POC
-        run: |
-          # Move to the child directory before creating the branch
-          cd child
-          # Create a release branch in GitHub POC matching the parent branch name
-          PARENT_BRANCH=${GITHUB_REF#refs/heads/}
-          git checkout -b $PARENT_BRANCH
-          echo "Release branch created in GitHub POC: $PARENT_BRANCH"
-
-      - name: Update Parent Version in GitHub POC POM
-        run: |
-          cd child
-          # Update the parent version in GitHub POC's pom.xml
-          sed -i "/<parent>/,/<\/parent>/ s|<version>[^<]*</version>|<version>$VERSION</version>|g" pom.xml
-          cat pom.xml  # Output the file content for debugging purposes
-          echo "Updated parent version to $VERSION in GitHub POC's pom.xml"
-
-      - name: Commit and Push Changes to GitHub POC
-        run: |
-          # Move to the child directory to commit and push changes
-          cd child
-          git config --local user.email "github-actions[bot]@users.noreply.github.com"
-          git config --local user.name "GitHub Actions"
-          git add pom.xml  # Ensure only pom.xml is tracked
-          git commit -m "Updated parent version to $VERSION"
-          # Use the personal access token for authentication
-          git push https://x-access-token:${{ secrets.GH_PAT }}@github.com/chetanpatil018/child.git $PARENT_BRANCH
