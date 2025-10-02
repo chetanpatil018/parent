@@ -14,35 +14,39 @@ jobs:
     if: "!contains(github.actor, 'github-actions[bot]')" # Avoid loops
 
     steps:
-      # 1. Checkout
+      # 1️⃣ Checkout current repo
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # 2. Extract current repo version
+      # 2️⃣ Install xmlstarlet
+      - name: Install xmlstarlet
+        run: sudo apt-get update && sudo apt-get install -y xmlstarlet
+
+      # 3️⃣ Extract current repo version
       - name: Get current version
         id: version
         run: |
           version=$(mvn help:evaluate -Dexpression=project.version -q -DforceStdout)
           echo "version=$version" >> $GITHUB_OUTPUT
 
-      # 3. Build current project
+      # 4️⃣ Build current project
       - name: Build project
         run: mvn clean install
 
-      # 4. Setup Git
+      # 5️⃣ Setup Git
       - name: Setup Git
         run: |
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
 
-      # 5. Load dependents from JSON
+      # 6️⃣ Load dependents from JSON
       - name: Load dependents
         id: deps
         run: |
           dependents=$(jq -r '.dependents[]?' dependencies.json)
           echo "dependents=$dependents" >> $GITHUB_OUTPUT
 
-      # 6. Update dependents sequentially
+      # 7️⃣ Update dependent repositories sequentially
       - name: Update dependent repos
         env:
           GH_TOKEN: ${{ secrets.PAT_TOKEN }}
@@ -54,7 +58,7 @@ jobs:
             echo "🔹 Processing dependent repo: $repo"
 
             git clone https://x-access-token:${GH_TOKEN}@github.com/chetanpatil018/$repo.git
-            cd $repo
+            cd $repo || { echo "❌ Failed to enter repo $repo"; exit 1; }
 
             # Check or create release branch
             if git ls-remote --heads origin $BRANCH_NAME | grep $BRANCH_NAME; then
@@ -66,21 +70,34 @@ jobs:
 
             echo "🔹 Updating parent and dependencies in $repo"
 
-            # 1️⃣ Update parent version
-            xmlstarlet ed -L -u "/_:project/_:parent/_:version" -v "$VERSION" pom.xml || true
+            if [[ ! -f pom.xml ]]; then
+              echo "❌ pom.xml not found in $repo"
+              cd ..
+              rm -rf $repo
+              continue
+            fi
 
-            # 2️⃣ Update declared dependencies (from dependencies.json)
+            # Update parent version
+            echo "Updating parent version to $VERSION"
+            xmlstarlet ed -L -u "/_:project/_:parent/_:version" -v "$VERSION" pom.xml || echo "⚠️ Failed to update parent version in $repo"
+
+            # Update declared dependencies (from dependencies.json)
             deps_to_update=$(jq -r '.dependencies[]?' dependencies.json)
             for dep in $deps_to_update
             do
-              echo "Updating dependency $dep to $VERSION"
-              xmlstarlet ed -L -u "//_:dependency[_:artifactId='$dep']/_:version" -v "$VERSION" pom.xml || true
+              if [[ "$dep" == *"."* ]]; then
+                echo "Updating property $dep to $VERSION"
+                xmlstarlet ed -L -u "/_:project/_:properties/_:$dep" -v "$VERSION" pom.xml || echo "⚠️ Failed to update property $dep in $repo"
+              else
+                echo "Updating dependency $dep to $VERSION"
+                xmlstarlet ed -L -u "//_:dependency[_:artifactId='$dep']/_:version" -v "$VERSION" pom.xml || echo "⚠️ Failed to update dependency $dep in $repo"
+              fi
             done
 
-            # 3️⃣ Extract current version
-            current_version=$(mvn help:evaluate -Dexpression=project.version -q -DforceStdout)
+            # Extract current version
+            current_version=$(mvn help:evaluate -Dexpression=project.version -q -DforceStdout 2>&1) || { echo "❌ Maven failed in $repo: $current_version"; exit 1; }
 
-            # 4️⃣ Compute next patch version (handles snapshot and release)
+            # Compute next patch version
             base_version=$(echo "$current_version" | sed 's/-SNAPSHOT//')
             major=$(echo "$base_version" | cut -d. -f1)
             minor=$(echo "$base_version" | cut -d. -f2)
@@ -94,12 +111,16 @@ jobs:
             fi
 
             echo "🔹 Bumping version from $current_version → $next_version"
-            mvn versions:set -DnewVersion=$next_version -DgenerateBackupPoms=false
+            mvn versions:set -DnewVersion=$next_version -DgenerateBackupPoms=false 2>&1 || echo "⚠️ Maven versions:set failed in $repo"
 
-            # Commit and push
+            # Commit and push only if there are changes
             git add pom.xml
-            git commit -m "Bump version to $next_version and update dependencies to $VERSION [skip ci]"
-            git push origin $BRANCH_NAME
+            if git diff --cached --quiet; then
+              echo "No changes to commit in $repo"
+            else
+              git commit -m "Bump version to $next_version and update dependencies to $VERSION [skip ci]" || echo "⚠️ Git commit failed in $repo"
+              git push origin $BRANCH_NAME || echo "⚠️ Git push failed in $repo"
+            fi
 
             cd ..
             rm -rf $repo
