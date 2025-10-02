@@ -1,67 +1,195 @@
-name: Sync Parent Version with GitHub POC
+name: Chained Version Propagation Build
 
 on:
   push:
     paths:
       - 'pom.xml'  # Trigger only on pom.xml updates
     branches:
-      - release/*  # Trigger on release branches
+      - 'release/*'  # Trigger on release branches
+      - 'master'
 
 jobs:
-  sync-version:
+  build-and-propagate:
     runs-on: ubuntu-latest
+    if: "!contains(github.actor, 'github-actions[bot]')" # Avoid loops
 
     steps:
-      - name: Checkout Parent Repository
-        uses: actions/checkout@v2
+      # 1. Checkout
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
-      - name: Extract Version from Parent POM
+      # 2. Extract current repo version
+      - name: Get current version
+        id: version
         run: |
-          # Extract the version from the parent pom.xml
-          VERSION=$(mvn help:evaluate -Dexpression=project.version -q -DforceStdout)
-          echo "VERSION=$VERSION" >> $GITHUB_ENV
+          version=$(mvn help:evaluate -Dexpression=project.version -q -DforceStdout)
+          echo "version=$version" >> $GITHUB_OUTPUT
 
-      - name: Update GitHub POC Repositories
+      # 3. Build current project
+      - name: Build project
+        run: mvn clean install
+
+      # 4. Setup Git
+      - name: Setup Git
         run: |
-          # Define all child repositories to be updated
-          REPOS=(
-            "chetanpatil018/child"
-            "chetanpatil018/child1"
-            )
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
 
-          # Iterate through each child repository
-          for REPO in "${REPOS[@]}"; do
-            echo "Processing $REPO..."
+      # 5. Load dependents from JSON
+      - name: Load dependents
+        id: deps
+        run: |
+          dependents=$(jq -r '.dependents[]?' dependencies.json)
+          echo "dependents=$dependents" >> $GITHUB_OUTPUT
 
-            # Clone the repository
-            git clone https://x-access-token:${{ secrets.GH_PAT }}@github.com/$REPO.git
-            cd $(basename "$REPO")  # Enter the cloned repository directory
+      # 6. Update dependents sequentially
+      - name: Update dependent repos
+        env:
+          GH_TOKEN: ${{ secrets.PAT_TOKEN }}
+          VERSION: ${{ steps.version.outputs.version }}
+          BRANCH_NAME: ${{ github.ref_name }}
+        run: |
+          for repo in ${{ steps.deps.outputs.dependents }}
+          do
+            echo "🔹 Processing dependent repo: $repo"
 
-            # Get the current branch name from the parent repository
-            PARENT_BRANCH=${GITHUB_REF#refs/heads/}
+            git clone https://x-access-token:${GH_TOKEN}@github.com/your-org/$repo.git
+            cd $repo
 
-            # Check if the branch already exists in the child repo
-            if git ls-remote --heads origin $PARENT_BRANCH | grep $PARENT_BRANCH; then
-              echo "Branch $PARENT_BRANCH already exists, pulling latest changes..."
-              git checkout $PARENT_BRANCH
-              git pull origin $PARENT_BRANCH  # Pull the latest changes from the existing branch
+            # Check or create release branch
+            if git ls-remote --heads origin $BRANCH_NAME | grep $BRANCH_NAME; then
+              git checkout $BRANCH_NAME
+              git pull
             else
-              echo "Creating new branch $PARENT_BRANCH"
-              git checkout -b $PARENT_BRANCH  # Create a new branch if it doesn't exist
+              git checkout -b $BRANCH_NAME
             fi
 
-            # Update the parent version in the child pom.xml
-            sed -i "/<parent>/,/<\/parent>/ s|<version>[^<]*</version>|<version>$VERSION</version>|g" pom.xml
-            echo "Updated parent version to $VERSION in $REPO's pom.xml"
+            echo "🔹 Updating parent and dependencies in $repo"
 
-            # Commit and push the changes
-            git config --local user.email "github-actions[bot]@users.noreply.github.com"
-            git config --local user.name "GitHub Actions"
+            # 1️⃣ Update parent version
+            xmlstarlet ed -L -u "/_:project/_:parent/_:version" -v "$VERSION" pom.xml || true
+
+            # 2️⃣ Update declared dependencies (from dependencies.json)
+            deps_to_update=$(jq -r '.dependencies[]?' dependencies.json)
+            for dep in $deps_to_update
+            do
+              echo "Updating dependency $dep to $VERSION"
+              xmlstarlet ed -L -u "//_:dependency[_:artifactId='$dep']/_:version" -v "$VERSION" pom.xml || true
+            done
+
+            # 3️⃣ Extract current version
+            current_version=$(mvn help:evaluate -Dexpression=project.version -q -DforceStdout)
+
+            # 4️⃣ Compute next patch version (handles snapshot and release)
+            base_version=$(echo "$current_version" | sed 's/-SNAPSHOT//')
+            major=$(echo "$base_version" | cut -d. -f1)
+            minor=$(echo "$base_version" | cut -d. -f2)
+            patch=$(echo "$base_version" | cut -d. -f3)
+            next_patch=$((patch + 1))
+            next_version="${major}.${minor}.${next_patch}"
+
+            # Keep SNAPSHOT suffix for non-master branches
+            if [[ "$BRANCH_NAME" != "master" ]]; then
+              next_version="${next_version}-SNAPSHOT"
+            fi
+
+            echo "🔹 Bumping version from $current_version → $next_version"
+            mvn versions:set -DnewVersion=$next_version -DgenerateBackupPoms=false
+
+            # Commit and push
             git add pom.xml
-            git commit -m "Updated parent version to $VERSION"
-            git push origin $PARENT_BRANCH  # Push the changes
+            git commit -m "Bump version to $next_version and update dependencies to $VERSION [skip ci]"
+            git push origin $BRANCH_NAME
 
-            cd ..  # Return to the parent directory to process the next repo
+            cd ..
+            rm -rf $repo
           done
+
+jobs:
+  build-and-propagate:
+    runs-on: ubuntu-latest
+    if: "!contains(github.actor, 'github-actions[bot]')" # Skip builds triggered by bot commits
+
+    steps:
+      # 1. Checkout repo
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # 2. Extract current repo version
+      - name: Get current version
+        id: version
+        run: |
+          version=$(mvn help:evaluate -Dexpression=project.version -q -DforceStdout)
+          echo "version=$version" >> $GITHUB_OUTPUT
+
+      # 3. Build the current repo
+      - name: Build project
+        run: mvn clean install
+
+      # 4. Setup Git
+      - name: Setup Git
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+
+      # 5. Load dependents from dependencies.json
+      - name: Load dependents
+        id: deps
+        run: |
+          dependents=$(cat dependencies.json | jq -r '.dependents[]')
+          echo "dependents=$dependents" >> $GITHUB_OUTPUT
+
+      # 6. Update dependent repos sequentially
+      - name: Update dependent repos with version bump
         env:
-          GH_PAT: ${{ secrets.GH_PAT }}  # Use the Personal Access Token for authentication
+          GH_TOKEN: ${{ secrets.PAT_TOKEN }}
+          VERSION: ${{ steps.version.outputs.version }}
+          BRANCH_NAME: ${{ github.ref_name }}
+        run: |
+          for repo in ${{ steps.deps.outputs.dependents }}
+          do
+            echo "🔁 Processing dependent repo: $repo"
+            git clone https://x-access-token:${GH_TOKEN}@github.com/your-org/$repo.git
+            cd $repo
+
+            # Checkout or create branch
+            if git ls-remote --heads origin $BRANCH_NAME | grep -q $BRANCH_NAME; then
+              git checkout $BRANCH_NAME
+              git pull origin $BRANCH_NAME
+            else
+              git checkout -b $BRANCH_NAME
+            fi
+
+            # 🧠 Extract current version
+            current_version=$(mvn help:evaluate -Dexpression=project.version -q -DforceStdout)
+            echo "Current version: $current_version"
+
+            # 🧮 Auto-bump patch version
+            if [[ "$current_version" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)(-SNAPSHOT)?$ ]]; then
+              major="${BASH_REMATCH[1]}"
+              minor="${BASH_REMATCH[2]}"
+              patch="${BASH_REMATCH[3]}"
+              suffix="${BASH_REMATCH[4]}"
+
+              new_patch=$((patch + 1))
+              new_version="${major}.${minor}.${new_patch}${suffix}"
+
+              echo "🔼 Bumped version: $new_version"
+
+              # Update version in pom.xml
+              mvn versions:set -DnewVersion=$new_version -DgenerateBackupPoms=false
+            else
+              echo "⚠️ Could not parse version pattern, skipping bump."
+            fi
+
+            # 🔄 Update parent version reference to latest propagated version
+            xmlstarlet ed -L -u "/_:project/_:parent/_:version" -v "$VERSION" pom.xml
+
+            # Commit and push
+            git add pom.xml
+            git commit -m "Bump version to $new_version and update parent to $VERSION [skip ci]" || true
+            git push origin $BRANCH_NAME
+
+            cd ..
+            rm -rf $repo
+          done
