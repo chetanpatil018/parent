@@ -53,7 +53,7 @@ jobs:
           do
             echo "🔹 Processing dependent repo: $repo"
 
-            git clone https://x-access-token:${GH_TOKEN}@github.com/your-org/$repo.git
+            git clone https://x-access-token:${GH_TOKEN}@github.com/chetanpatil018/$repo.git
             cd $repo
 
             # Check or create release branch
