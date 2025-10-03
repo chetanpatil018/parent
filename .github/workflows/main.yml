@@ -7,7 +7,7 @@ on:
     branches:
       - 'release/*'
       - 'master'
-  workflow_dispatch:      
+  workflow_dispatch:
 
 jobs:
   build-and-propagate:
@@ -18,15 +18,28 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # 2️⃣ Install dependencies
+      # 2️⃣ Install xmlstarlet & jq
       - name: Install xmlstarlet & jq
         run: sudo apt-get update && sudo apt-get install -y xmlstarlet jq
 
-      # 3️⃣ Extract current repo version
+      # 3️⃣ Extract version dynamically
       - name: Get current version
         id: version
         run: |
-          version=$(mvn help:evaluate -Dexpression=project.version -q -DforceStdout)
+          echo "🔹 Checking for parent POM..."
+          if grep -q "<parent>" pom.xml; then
+            echo "Parent POM detected — using grep-based version extraction"
+            version=$(grep -m1 "<version>" pom.xml | sed -E 's/.*<version>(.*)<\/version>.*/\1/')
+          else
+            echo "No parent — using Maven help:evaluate"
+            version=$(mvn help:evaluate -Dexpression=project.version -q -DforceStdout)
+          fi
+
+          if [[ -z "$version" ]]; then
+            echo "❌ Failed to extract version"
+            exit 1
+          fi
+          echo "✅ Detected version: $version"
           echo "version=$version" >> $GITHUB_OUTPUT
 
       # 4️⃣ Build current project
@@ -60,7 +73,7 @@ jobs:
             git clone https://x-access-token:${GH_TOKEN}@github.com/chetanpatil018/$repo.git
             cd $repo || { echo "❌ Failed to enter repo $repo"; exit 1; }
 
-            # Ensure the branch exists in child repo
+            # Ensure branch exists
             if git ls-remote --heads origin $BRANCH_NAME | grep $BRANCH_NAME; then
               git checkout $BRANCH_NAME
               git pull
@@ -76,11 +89,10 @@ jobs:
               continue
             fi
 
-            # Update parent version
             echo "Updating parent version to $VERSION"
             xmlstarlet ed -L -u "/_:project/_:parent/_:version" -v "$VERSION" pom.xml || echo "⚠️ Failed to update parent version"
 
-            # Update declared dependencies (from dependencies.json)
+            # Update declared dependencies
             deps_to_update=$(jq -r '.dependencies[]?' dependencies.json)
             for dep in $deps_to_update
             do
@@ -91,8 +103,21 @@ jobs:
               fi
             done
 
-            # Extract current version
-            current_version=$(mvn help:evaluate -Dexpression=project.version -q -DforceStdout 2>&1)
+            # Extract current version safely
+            if grep -q "<parent>" pom.xml; then
+              current_version=$(grep -m1 "<version>" pom.xml | sed -E 's/.*<version>(.*)<\/version>.*/\1/')
+            else
+              current_version=$(mvn help:evaluate -Dexpression=project.version -q -DforceStdout 2>/dev/null || echo "")
+            fi
+
+            if [[ -z "$current_version" ]]; then
+              echo "❌ Could not determine current version for $repo"
+              cd ..
+              rm -rf $repo
+              continue
+            fi
+
+            echo "Current version in $repo: $current_version"
 
             # Compute next patch version
             base_version=$(echo "$current_version" | sed 's/-SNAPSHOT//')
@@ -102,15 +127,14 @@ jobs:
             next_patch=$((patch + 1))
             next_version="${major}.${minor}.${next_patch}"
 
-            # Keep SNAPSHOT suffix for non-master branches
+            # Keep SNAPSHOT for non-master branches
             if [[ "$BRANCH_NAME" != "master" ]]; then
               next_version="${next_version}-SNAPSHOT"
             fi
 
-            # Update version in repo
             mvn versions:set -DnewVersion=$next_version -DgenerateBackupPoms=false
 
-            # Commit and push changes with [skip ci] to avoid loops
+            # Commit & push
             git add pom.xml
             if git diff --cached --quiet; then
               echo "No changes to commit in $repo"
@@ -121,7 +145,7 @@ jobs:
 
             cd ..
 
-            # Trigger child workflow via workflow_dispatch
+            # Trigger next workflow
             echo "Triggering workflow_dispatch for $repo"
             curl -X POST \
               -H "Accept: application/vnd.github+json" \
