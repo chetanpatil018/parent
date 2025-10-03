@@ -59,15 +59,11 @@ jobs:
           git config --global user.email "ci-user@example.com"
 
       # 6️⃣ Load dependents from JSON
-      - name: Load dependents
+      - name: Load dependents from JSON
         id: deps
         run: |
-          dependents=$(jq -r '.dependents[]?' dependencies.json)
-          {
-          echo "dependents<<EOF"
-          echo "$dependents"
-          echo "EOF"
-          } >> "$GITHUB_OUTPUT"
+          dependents=$(jq -r '.dependents[]?' dependencies.json | xargs)
+          echo "dependents=$dependents" >> $GITHUB_OUTPUT
 
       # 7️⃣ Update dependent repositories sequentially
       - name: Update dependent repos
