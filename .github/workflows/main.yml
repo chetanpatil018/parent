@@ -3,24 +3,23 @@ name: Chained Version Propagation Build
 on:
   push:
     paths:
-      - 'pom.xml'  # Trigger only on pom.xml updates
+      - 'pom.xml'
     branches:
-      - 'release/*'  # Trigger on release branches
+      - 'release/*'
       - 'master'
 
 jobs:
   build-and-propagate:
     runs-on: ubuntu-latest
-    if: "!contains(github.actor, 'github-actions[bot]')" # Avoid loops
 
     steps:
       # 1️⃣ Checkout current repo
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # 2️⃣ Install xmlstarlet
-      - name: Install xmlstarlet
-        run: sudo apt-get update && sudo apt-get install -y xmlstarlet
+      # 2️⃣ Install dependencies
+      - name: Install xmlstarlet & jq
+        run: sudo apt-get update && sudo apt-get install -y xmlstarlet jq
 
       # 3️⃣ Extract current repo version
       - name: Get current version
@@ -36,8 +35,8 @@ jobs:
       # 5️⃣ Setup Git
       - name: Setup Git
         run: |
-          git config --global user.name "github-actions[bot]"
-          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git config --global user.name "ci-user"
+          git config --global user.email "ci-user@example.com"
 
       # 6️⃣ Load dependents from JSON
       - name: Load dependents
@@ -60,15 +59,14 @@ jobs:
             git clone https://x-access-token:${GH_TOKEN}@github.com/chetanpatil018/$repo.git
             cd $repo || { echo "❌ Failed to enter repo $repo"; exit 1; }
 
-            # Check or create release branch
+            # Ensure the branch exists in child repo
             if git ls-remote --heads origin $BRANCH_NAME | grep $BRANCH_NAME; then
               git checkout $BRANCH_NAME
               git pull
             else
               git checkout -b $BRANCH_NAME
+              git push origin $BRANCH_NAME
             fi
-
-            echo "🔹 Updating parent and dependencies in $repo"
 
             if [[ ! -f pom.xml ]]; then
               echo "❌ pom.xml not found in $repo"
@@ -79,23 +77,21 @@ jobs:
 
             # Update parent version
             echo "Updating parent version to $VERSION"
-            xmlstarlet ed -L -u "/_:project/_:parent/_:version" -v "$VERSION" pom.xml || echo "⚠️ Failed to update parent version in $repo"
+            xmlstarlet ed -L -u "/_:project/_:parent/_:version" -v "$VERSION" pom.xml || echo "⚠️ Failed to update parent version"
 
             # Update declared dependencies (from dependencies.json)
             deps_to_update=$(jq -r '.dependencies[]?' dependencies.json)
             for dep in $deps_to_update
             do
               if [[ "$dep" == *"."* ]]; then
-                echo "Updating property $dep to $VERSION"
-                xmlstarlet ed -L -u "/_:project/_:properties/_:$dep" -v "$VERSION" pom.xml || echo "⚠️ Failed to update property $dep in $repo"
+                xmlstarlet ed -L -u "/_:project/_:properties/_:$dep" -v "$VERSION" pom.xml || echo "⚠️ Failed to update property $dep"
               else
-                echo "Updating dependency $dep to $VERSION"
-                xmlstarlet ed -L -u "//_:dependency[_:artifactId='$dep']/_:version" -v "$VERSION" pom.xml || echo "⚠️ Failed to update dependency $dep in $repo"
+                xmlstarlet ed -L -u "//_:dependency[_:artifactId='$dep']/_:version" -v "$VERSION" pom.xml || echo "⚠️ Failed to update dependency $dep"
               fi
             done
 
             # Extract current version
-            current_version=$(mvn help:evaluate -Dexpression=project.version -q -DforceStdout 2>&1) || { echo "❌ Maven failed in $repo: $current_version"; exit 1; }
+            current_version=$(mvn help:evaluate -Dexpression=project.version -q -DforceStdout 2>&1)
 
             # Compute next patch version
             base_version=$(echo "$current_version" | sed 's/-SNAPSHOT//')
@@ -110,18 +106,27 @@ jobs:
               next_version="${next_version}-SNAPSHOT"
             fi
 
-            echo "🔹 Bumping version from $current_version → $next_version"
-            mvn versions:set -DnewVersion=$next_version -DgenerateBackupPoms=false 2>&1 || echo "⚠️ Maven versions:set failed in $repo"
+            # Update version in repo
+            mvn versions:set -DnewVersion=$next_version -DgenerateBackupPoms=false
 
-            # Commit and push only if there are changes
+            # Commit and push changes with [skip ci] to avoid loops
             git add pom.xml
             if git diff --cached --quiet; then
               echo "No changes to commit in $repo"
             else
-              git commit -m "Bump version to $next_version and update dependencies to $VERSION [skip ci]" || echo "⚠️ Git commit failed in $repo"
-              git push origin $BRANCH_NAME || echo "⚠️ Git push failed in $repo"
+              git commit -m "Bump version to $next_version and update dependencies to $VERSION [skip ci]"
+              git push origin $BRANCH_NAME
             fi
 
             cd ..
+
+            # Trigger child workflow via workflow_dispatch
+            echo "Triggering workflow_dispatch for $repo"
+            curl -X POST \
+              -H "Accept: application/vnd.github+json" \
+              -H "Authorization: Bearer $GH_TOKEN" \
+              https://api.github.com/repos/chetanpatil018/$repo/actions/workflows/main.yml/dispatches \
+              -d "{\"ref\":\"$BRANCH_NAME\"}"
+
             rm -rf $repo
           done
