@@ -126,9 +126,8 @@ jobs:
 
               # Update property if it contains a dot (e.g., commons.version)
               if [[ "$dep_name" == *"."* ]]; then
-                xmlstarlet ed -L -u "/_:project/_:properties/_:$dep_name" -v "$src_version" pom.xml || echo "⚠️ Failed to update property $dep_name"
+                xmlstarlet ed -L -u "/_:project/_:properties/*[local-name()='$dep_name']" -v "$src_version" pom.xml || echo "⚠️ Failed to update property $dep_name"
               else
-                # Otherwise update dependency version
                 xmlstarlet ed -L -u "//_:dependency[_:artifactId='$dep_name']/_:version" -v "$src_version" pom.xml || echo "⚠️ Failed to update dependency $dep_name"
               fi
             done
