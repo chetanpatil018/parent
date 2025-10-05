@@ -14,32 +14,32 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      # 1️⃣ Checkout current repo
+      # 1️⃣ Checkout the repository
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # 2️⃣ Install xmlstarlet & jq
+      # 2️⃣ Install necessary tools: xmlstarlet for XML manipulation, jq for JSON parsing
       - name: Install xmlstarlet & jq
         run: sudo apt-get update && sudo apt-get install -y xmlstarlet jq
 
-      # 3️⃣ Extract version dynamically (universal fix)
+      # 3️⃣ Extract current project version from pom.xml
       - name: Get current version
         id: version
         run: |
           echo "🔹 Extracting project version from pom.xml"
 
-          # Prefer xmlstarlet (safe and exact)
+          # Prefer xmlstarlet (precise)
           if command -v xmlstarlet >/dev/null 2>&1; then
             version=$(xmlstarlet sel -t -v "/_:project/_:version" pom.xml 2>/dev/null || echo "")
           fi
 
-          # Fallback to Maven if XML fails
+          # Fallback to Maven if xmlstarlet fails
           if [[ -z "$version" ]]; then
             echo "⚠️ xmlstarlet failed, trying Maven help:evaluate"
             version=$(mvn help:evaluate -Dexpression=project.version -q -DforceStdout 2>/dev/null || echo "")
           fi
 
-          # Validation
+          # Exit if version could not be determined
           if [[ -z "$version" ]]; then
             echo "❌ Failed to extract version from pom.xml"
             exit 1
@@ -48,24 +48,25 @@ jobs:
           echo "✅ Detected version: $version"
           echo "version=$version" >> $GITHUB_OUTPUT
 
-      # 4️⃣ Build current project
+      # 4️⃣ Build the current project to ensure correctness
       - name: Build project
         run: mvn clean install
 
-      # 5️⃣ Setup Git
+      # 5️⃣ Setup Git configuration for commits in dependent repos
       - name: Setup Git
         run: |
           git config --global user.name "ci-user"
           git config --global user.email "ci-user@example.com"
 
-      # 6️⃣ Load dependents from JSON
+      # 6️⃣ Load dependents list from dependencies.json
       - name: Load dependents from JSON
         id: deps
         run: |
+          # Extract dependents (if none, this will be empty)
           dependents=$(jq -r '.dependents[]?' dependencies.json | xargs)
           echo "dependents=$dependents" >> $GITHUB_OUTPUT
 
-      # 7️⃣ Update dependent repositories sequentially
+      # 7️⃣ Loop through each dependent repo and update versions
       - name: Update dependent repos
         env:
           GH_TOKEN: ${{ secrets.PAT_TOKEN }}
@@ -76,10 +77,11 @@ jobs:
           do
             echo "🔹 Processing dependent repo: $repo"
 
+            # Clone dependent repository using PAT token
             git clone https://x-access-token:${GH_TOKEN}@github.com/chetanpatil018/$repo.git
             cd $repo || { echo "❌ Failed to enter repo $repo"; exit 1; }
 
-            # Ensure branch exists
+            # Ensure the branch exists; if not, create and push it
             if git ls-remote --heads origin $BRANCH_NAME | grep $BRANCH_NAME; then
               git checkout $BRANCH_NAME
               git pull
@@ -88,6 +90,7 @@ jobs:
               git push origin $BRANCH_NAME
             fi
 
+            # Skip repos without pom.xml
             if [[ ! -f pom.xml ]]; then
               echo "❌ pom.xml not found in $repo"
               cd ..
@@ -95,13 +98,12 @@ jobs:
               continue
             fi
 
+            # Update parent version in pom.xml
             echo "Updating parent version to $VERSION"
             xmlstarlet ed -L -u "/_:project/_:parent/_:version" -v "$VERSION" pom.xml || echo "⚠️ Failed to update parent version"
 
-            # 🔹 Read dependencies from JSON with their sources
-            deps_to_update=$(jq -c '.dependencies[]?' ../dependencies.json)
-
-            for dep_entry in $deps_to_update; do
+            # 🔹 Update dependencies/properties using dependencies.json
+            jq -c '.dependencies[]?' ../dependencies.json | while read -r dep_entry; do
               dep_name=$(echo "$dep_entry" | jq -r '.name')
               dep_source=$(echo "$dep_entry" | jq -r '.source')
 
@@ -111,7 +113,7 @@ jobs:
                 continue
               fi
 
-              # Extract the version from the source repo’s pom.xml
+              # Fetch source repo version from raw pom.xml
               echo "Fetching version from source repo: $dep_source"
               src_version=$(curl -s "https://raw.githubusercontent.com/chetanpatil018/$dep_source/$BRANCH_NAME/pom.xml" | xmlstarlet sel -t -v "/_:project/_:version" 2>/dev/null || echo "")
 
@@ -120,18 +122,18 @@ jobs:
                 continue
               fi
 
-              echo "✅ Found $dep_source version: $src_version"
+              echo "🔸 Updating $dep_name to version $src_version from $dep_source"
 
-              # If it's a property (commons.version), update under <properties>
+              # Update property if it contains a dot (e.g., commons.version)
               if [[ "$dep_name" == *"."* ]]; then
                 xmlstarlet ed -L -u "/_:project/_:properties/_:$dep_name" -v "$src_version" pom.xml || echo "⚠️ Failed to update property $dep_name"
               else
-                # Otherwise update direct dependency version
+                # Otherwise update dependency version
                 xmlstarlet ed -L -u "//_:dependency[_:artifactId='$dep_name']/_:version" -v "$src_version" pom.xml || echo "⚠️ Failed to update dependency $dep_name"
               fi
             done
 
-            # Extract current version safely
+            # Extract current version safely for patch increment
             current_version=$(xmlstarlet sel -t -v "/_:project/_:version" pom.xml 2>/dev/null || echo "")
             if [[ -z "$current_version" ]]; then
               current_version=$(mvn help:evaluate -Dexpression=project.version -q -DforceStdout 2>/dev/null || echo "")
@@ -159,9 +161,10 @@ jobs:
               next_version="${next_version}-SNAPSHOT"
             fi
 
+            # Update version in pom.xml
             mvn versions:set -DnewVersion=$next_version -DgenerateBackupPoms=false
 
-            # Commit & push
+            # Commit & push changes if any
             git add pom.xml
             if git diff --cached --quiet; then
               echo "No changes to commit in $repo"
@@ -172,7 +175,7 @@ jobs:
 
             cd ..
 
-            # Trigger next workflow
+            # Trigger workflow_dispatch for dependent repo
             echo "Triggering workflow_dispatch for $repo"
             curl -X POST \
               -H "Accept: application/vnd.github+json" \
@@ -180,5 +183,6 @@ jobs:
               https://api.github.com/repos/chetanpatil018/$repo/actions/workflows/main.yml/dispatches \
               -d "{\"ref\":\"$BRANCH_NAME\"}"
 
+            # Clean up cloned repo
             rm -rf $repo
           done
