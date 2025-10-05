@@ -98,14 +98,36 @@ jobs:
             echo "Updating parent version to $VERSION"
             xmlstarlet ed -L -u "/_:project/_:parent/_:version" -v "$VERSION" pom.xml || echo "⚠️ Failed to update parent version"
 
-            # Update declared dependencies
-            deps_to_update=$(jq -r '.dependencies[]?' dependencies.json)
-            for dep in $deps_to_update
-            do
-              if [[ "$dep" == *"."* ]]; then
-                xmlstarlet ed -L -u "/_:project/_:properties/_:$dep" -v "$VERSION" pom.xml || echo "⚠️ Failed to update property $dep"
+            # 🔹 Read dependencies from JSON with their sources
+            deps_to_update=$(jq -c '.dependencies[]?' ../dependencies.json)
+
+            for dep_entry in $deps_to_update; do
+              dep_name=$(echo "$dep_entry" | jq -r '.name')
+              dep_source=$(echo "$dep_entry" | jq -r '.source')
+
+              # Skip invalid entries
+              if [[ -z "$dep_name" || -z "$dep_source" ]]; then
+                echo "⚠️ Skipping invalid dependency entry: $dep_entry"
+                continue
+              fi
+
+              # Extract the version from the source repo’s pom.xml
+              echo "Fetching version from source repo: $dep_source"
+              src_version=$(curl -s "https://raw.githubusercontent.com/chetanpatil018/$dep_source/$BRANCH_NAME/pom.xml" | xmlstarlet sel -t -v "/_:project/_:version" 2>/dev/null || echo "")
+
+              if [[ -z "$src_version" ]]; then
+                echo "⚠️ Could not fetch version from $dep_source — skipping update for $dep_name"
+                continue
+              fi
+
+              echo "✅ Found $dep_source version: $src_version"
+
+              # If it's a property (commons.version), update under <properties>
+              if [[ "$dep_name" == *"."* ]]; then
+                xmlstarlet ed -L -u "/_:project/_:properties/_:$dep_name" -v "$src_version" pom.xml || echo "⚠️ Failed to update property $dep_name"
               else
-                xmlstarlet ed -L -u "//_:dependency[_:artifactId='$dep']/_:version" -v "$VERSION" pom.xml || echo "⚠️ Failed to update dependency $dep"
+                # Otherwise update direct dependency version
+                xmlstarlet ed -L -u "//_:dependency[_:artifactId='$dep_name']/_:version" -v "$src_version" pom.xml || echo "⚠️ Failed to update dependency $dep_name"
               fi
             done
 
@@ -144,7 +166,7 @@ jobs:
             if git diff --cached --quiet; then
               echo "No changes to commit in $repo"
             else
-              git commit -m "Bump version to $next_version and update dependencies to $VERSION [skip ci]"
+              git commit -m "Bump version to $next_version and update dependencies using their source repos [skip ci]"
               git push origin $BRANCH_NAME
             fi
 
