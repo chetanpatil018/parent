@@ -66,13 +66,15 @@ jobs:
           dependents=$(jq -r '.dependents[]?' dependencies.json | xargs)
           echo "dependents=$dependents" >> $GITHUB_OUTPUT
 
-      # 7️⃣ Loop through each dependent repo and update versions
+      # 7️⃣ Loop through each dependent repo and update versions (fixed)
       - name: Update dependent repos
         env:
           GH_TOKEN: ${{ secrets.PAT_TOKEN }}
           VERSION: ${{ steps.version.outputs.version }}
           BRANCH_NAME: ${{ github.ref_name }}
         run: |
+          set -euo pipefail
+
           for repo in ${{ steps.deps.outputs.dependents }}
           do
             echo "🔹 Processing dependent repo: $repo"
@@ -82,12 +84,12 @@ jobs:
             cd $repo || { echo "❌ Failed to enter repo $repo"; exit 1; }
 
             # Ensure the branch exists; if not, create and push it
-            if git ls-remote --heads origin $BRANCH_NAME | grep $BRANCH_NAME; then
-              git checkout $BRANCH_NAME
-              git pull
+            if git ls-remote --heads origin "$BRANCH_NAME" | grep -q "$BRANCH_NAME"; then
+              git checkout "$BRANCH_NAME"
+              git pull --ff-only
             else
-              git checkout -b $BRANCH_NAME
-              git push origin $BRANCH_NAME
+              git checkout -b "$BRANCH_NAME"
+              git push origin "$BRANCH_NAME"
             fi
 
             # Skip repos without pom.xml
@@ -98,41 +100,60 @@ jobs:
               continue
             fi
 
-            # Update parent version in pom.xml
-            echo "Updating parent version to $VERSION"
+            # Update parent version in pom.xml (this is correct)
+            echo "🔧 Updating parent version in $repo to $VERSION"
             xmlstarlet ed -L -u "/_:project/_:parent/_:version" -v "$VERSION" pom.xml || echo "⚠️ Failed to update parent version"
 
-            # 🔹 Update dependencies/properties using dependencies.json
-            jq -c '.dependencies[]?' ../dependencies.json | while read -r dep_entry; do
-              dep_name=$(echo "$dep_entry" | jq -r '.name')
-              dep_source=$(echo "$dep_entry" | jq -r '.source')
+            # --- IMPORTANT FIX: read the dependent's own dependencies.json (not ../dependencies.json) ---
+            if [[ ! -f dependencies.json ]]; then
+              echo "⚠️ No dependencies.json in $repo — nothing to update here (skipping dependency updates)"
+            else
+              # Iterate each dependency object safely (one JSON object per line)
+              jq -c '.dependencies[]?' dependencies.json | while read -r dep_entry; do
+                dep_name=$(echo "$dep_entry" | jq -r '.name')
+                dep_source=$(echo "$dep_entry" | jq -r '.source')
 
-              # Skip invalid entries
-              if [[ -z "$dep_name" || -z "$dep_source" ]]; then
-                echo "⚠️ Skipping invalid dependency entry: $dep_entry"
-                continue
-              fi
+                if [[ -z "$dep_name" || -z "$dep_source" || "$dep_name" == "null" || "$dep_source" == "null" ]]; then
+                  echo "⚠️ Skipping invalid dependency entry: $dep_entry"
+                  continue
+                fi
 
-              # Fetch source repo version from raw pom.xml
-              echo "Fetching version from source repo: $dep_source"
-              src_version=$(curl -s "https://raw.githubusercontent.com/chetanpatil018/$dep_source/$BRANCH_NAME/pom.xml" | xmlstarlet sel -t -v "/_:project/_:version" 2>/dev/null || echo "")
+                echo "⤴️ Processing dependency entry: name='$dep_name' source='$dep_source'"
 
-              if [[ -z "$src_version" ]]; then
-                echo "⚠️ Could not fetch version from $dep_source — skipping update for $dep_name"
-                continue
-              fi
+                # Try fetch the source repo pom on the same branch; fallback to master/main if missing
+                src_version=""
+                for b in "$BRANCH_NAME" master main; do
+                  echo "   ↪ Trying to fetch version from https://raw.githubusercontent.com/chetanpatil018/${dep_source}/${b}/pom.xml"
+                  http_status=$(curl -s -o /tmp/_pom.xml -w "%{http_code}" "https://raw.githubusercontent.com/chetanpatil018/${dep_source}/${b}/pom.xml" || echo "000")
+                  if [[ "$http_status" == "200" && -s /tmp/_pom.xml ]]; then
+                    src_version=$(xmlstarlet sel -t -v "/_:project/_:version" /tmp/_pom.xml 2>/dev/null || echo "")
+                    echo "     ↪ Found pom on branch '$b' (http $http_status) → version='$src_version'"
+                    break
+                  else
+                    echo "     ↪ Not found on branch '$b' (http $http_status)"
+                  fi
+                done
 
-              echo "🔸 Updating $dep_name to version $src_version from $dep_source"
+                if [[ -z "$src_version" ]]; then
+                  echo "⚠️ Could not fetch version from repo '$dep_source' on branches [$BRANCH_NAME, master, main] — skipping $dep_name"
+                  continue
+                fi
 
-              # Update property if it contains a dot (e.g., commons.version)
-              if [[ "$dep_name" == *"."* ]]; then
-                xmlstarlet ed -L -u "/_:project/_:properties/*[local-name()='$dep_name']" -v "$src_version" pom.xml || echo "⚠️ Failed to update property $dep_name"
-              else
-                xmlstarlet ed -L -u "//_:dependency[_:artifactId='$dep_name']/_:version" -v "$src_version" pom.xml || echo "⚠️ Failed to update dependency $dep_name"
-              fi
-            done
+                # Update property or dependency in the dependent's pom
+                if [[ "$dep_name" == *"."* ]]; then
+                  # Use local-name() so dotted property names (e.g., common.version) are handled properly even with namespaces
+                  echo "   ↪ Updating property <$dep_name> → $src_version"
+                  xmlstarlet ed -L -u "/_:project/_:properties/*[local-name()='$dep_name']" -v "$src_version" pom.xml \
+                    || echo "⚠️ Failed to update property $dep_name"
+                else
+                  echo "   ↪ Updating dependency artifactId '$dep_name' → $src_version"
+                  xmlstarlet ed -L -u "//_:dependency[_:artifactId='$dep_name']/_:version" -v "$src_version" pom.xml \
+                    || echo "⚠️ Failed to update dependency $dep_name"
+                fi
+              done
+            fi
 
-            # Extract current version safely for patch increment
+            # Extract current version safely for patch increment (use xmlstarlet first)
             current_version=$(xmlstarlet sel -t -v "/_:project/_:version" pom.xml 2>/dev/null || echo "")
             if [[ -z "$current_version" ]]; then
               current_version=$(mvn help:evaluate -Dexpression=project.version -q -DforceStdout 2>/dev/null || echo "")
@@ -155,12 +176,11 @@ jobs:
             next_patch=$((patch + 1))
             next_version="${major}.${minor}.${next_patch}"
 
-            # Keep SNAPSHOT for non-master branches
             if [[ "$BRANCH_NAME" != "master" ]]; then
               next_version="${next_version}-SNAPSHOT"
             fi
 
-            # Update version in pom.xml
+            echo "🔧 Bumping $repo to $next_version"
             mvn versions:set -DnewVersion=$next_version -DgenerateBackupPoms=false
 
             # Commit & push changes if any
@@ -169,18 +189,19 @@ jobs:
               echo "No changes to commit in $repo"
             else
               git commit -m "Bump version to $next_version and update dependencies using their source repos [skip ci]"
-              git push origin $BRANCH_NAME
+              git push origin "$BRANCH_NAME"
             fi
 
             cd ..
 
             # Trigger workflow_dispatch for dependent repo
             echo "Triggering workflow_dispatch for $repo"
-            curl -X POST \
+            curl -s -X POST \
               -H "Accept: application/vnd.github+json" \
               -H "Authorization: Bearer $GH_TOKEN" \
               https://api.github.com/repos/chetanpatil018/$repo/actions/workflows/main.yml/dispatches \
-              -d "{\"ref\":\"$BRANCH_NAME\"}"
+              -d "{\"ref\":\"$BRANCH_NAME\"}" \
+              || echo "⚠️ workflow_dispatch failed for $repo"
 
             # Clean up cloned repo
             rm -rf $repo
