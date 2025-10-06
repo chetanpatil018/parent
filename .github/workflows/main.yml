@@ -109,9 +109,7 @@ jobs:
               echo "⚠️ No dependencies.json in $repo — nothing to update here (skipping dependency updates)"
             else
               # Iterate each dependency object safely (one JSON object per line)
-              jq -c '.dependencies[]?' dependencies.json | while read -r dep_entry; do
-                dep_name=$(echo "$dep_entry" | jq -r '.name')
-                dep_source=$(echo "$dep_entry" | jq -r '.source')
+              jq -r '.dependencies[]? | "\(.name)|\(.source)"' dependencies.json | while IFS="|" read -r dep_name dep_source; do
 
                 if [[ -z "$dep_name" || -z "$dep_source" || "$dep_name" == "null" || "$dep_source" == "null" ]]; then
                   echo "⚠️ Skipping invalid dependency entry: $dep_entry"
