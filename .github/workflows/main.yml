@@ -118,19 +118,27 @@ jobs:
 
                 echo "⤴️ Processing dependency entry: name='$dep_name' source='$dep_source'"
 
-                # Try fetch the source repo pom on the same branch; fallback to master/main if missing
+                # Determine version for this dependency source
                 src_version=""
-                for b in "$BRANCH_NAME" master main; do
-                  echo "   ↪ Trying to fetch version from https://github.com/chetanpatil018/$dep_source/blob/$BRANCH_NAME/pom.xml?raw=true"
-                  http_status=$(curl -s -o /tmp/_pom.xml -w "%{http_code}" "https://github.com/chetanpatil018/$dep_source/blob/$BRANCH_NAME/pom.xml?raw=true" || echo "000")
-                  if [[ "$http_status" == "200" && -s /tmp/_pom.xml ]]; then
-                    src_version=$(xmlstarlet sel -t -v "/_:project/_:version" /tmp/_pom.xml 2>/dev/null || echo "")
-                    echo "     ↪ Found pom on branch '$b' (http $http_status) → version='$src_version'"
-                    break
-                  else
-                    echo "     ↪ Not found on branch '$b' (http $http_status)"
-                  fi
-                done
+                
+                if [[ "$dep_source" == "${GITHUB_REPOSITORY##*/}" ]]; then
+                  # If the dependency source is the current repo, reuse current VERSION
+                  echo "   ↪ Source '$dep_source' is current repo → using local version: $VERSION"
+                  src_version="$VERSION"
+                else
+                  # Otherwise fetch from GitHub (try same branch, fallback to master/main)
+                  for b in "$BRANCH_NAME" master main; do
+                    echo "   ↪ Trying to fetch version from https://github.com/chetanpatil018/$dep_source/blob/$b/pom.xml?raw=true"
+                    http_status=$(curl -s -o /tmp/_pom.xml -w "%{http_code}" "https://github.com/chetanpatil018/$dep_source/blob/$b/pom.xml?raw=true" || echo "000")
+                    if [[ "$http_status" == "200" && -s /tmp/_pom.xml ]]; then
+                      src_version=$(xmlstarlet sel -t -v "/_:project/_:version" /tmp/_pom.xml 2>/dev/null || echo "")
+                      echo "     ↪ Found pom on branch '$b' (http $http_status) → version='$src_version'"
+                      break
+                    else
+                      echo "     ↪ Not found on branch '$b' (http $http_status)"
+                    fi
+                  done
+                fi
 
                 if [[ -z "$src_version" ]]; then
                   echo "⚠️ Could not fetch version from repo '$dep_source' on branches [$BRANCH_NAME, master, main] — skipping $dep_name"
