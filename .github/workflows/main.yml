@@ -28,18 +28,15 @@ jobs:
         run: |
           echo "🔹 Extracting project version from pom.xml"
 
-          # Prefer xmlstarlet (precise)
           if command -v xmlstarlet >/dev/null 2>&1; then
             version=$(xmlstarlet sel -t -v "/_:project/_:version" pom.xml 2>/dev/null || echo "")
           fi
 
-          # Fallback to Maven if xmlstarlet fails
           if [[ -z "$version" ]]; then
             echo "⚠️ xmlstarlet failed, trying Maven help:evaluate"
             version=$(mvn help:evaluate -Dexpression=project.version -q -DforceStdout 2>/dev/null || echo "")
           fi
 
-          # Exit if version could not be determined
           if [[ -z "$version" ]]; then
             echo "❌ Failed to extract version from pom.xml"
             exit 1
@@ -62,11 +59,10 @@ jobs:
       - name: Load dependents from JSON
         id: deps
         run: |
-          # Extract dependents (if none, this will be empty)
           dependents=$(jq -r '.dependents[]?' dependencies.json | xargs)
           echo "dependents=$dependents" >> $GITHUB_OUTPUT
 
-      # 7️⃣ Loop through each dependent repo and update versions (fixed)
+      # 7️⃣ Loop through each dependent repo and update versions
       - name: Update dependent repos
         env:
           GH_TOKEN: ${{ secrets.PAT_TOKEN }}
@@ -79,11 +75,9 @@ jobs:
           do
             echo "🔹 Processing dependent repo: $repo"
 
-            # Clone dependent repository using PAT token
             git clone https://x-access-token:${GH_TOKEN}@github.com/chetanpatil018/$repo.git
             cd $repo || { echo "❌ Failed to enter repo $repo"; exit 1; }
 
-            # Ensure the branch exists; if not, create and push it
             if git ls-remote --heads origin "$BRANCH_NAME" | grep -q "$BRANCH_NAME"; then
               git checkout "$BRANCH_NAME"
               git pull --ff-only
@@ -92,7 +86,6 @@ jobs:
               git push origin "$BRANCH_NAME"
             fi
 
-            # Skip repos without pom.xml
             if [[ ! -f pom.xml ]]; then
               echo "❌ pom.xml not found in $repo"
               cd ..
@@ -100,67 +93,65 @@ jobs:
               continue
             fi
 
-            # Update parent version in pom.xml
             echo "🔧 Updating parent version in $repo to $VERSION"
             xmlstarlet ed -L -u "/_:project/_:parent/_:version" -v "$VERSION" pom.xml || echo "⚠️ Failed to update parent version"
-            
-            # 🔽 INSERT your GitHub API–based dependency update block here
+
+            # 🔽 Update dependencies according to dependencies.json with type
             if [[ -f dependencies.json ]]; then
               echo "🔍 Updating dependencies from dependencies.json using GitHub API"
-              
+
               REPO_NAME="${GITHUB_REPOSITORY##*/}"
-              
-              # Loop through each dependency
+
               for dep in $(jq -c '.dependencies[]' dependencies.json); do
                 name=$(echo "$dep" | jq -r '.name')
                 source=$(echo "$dep" | jq -r '.source')
-            
-                echo "⤴️ Processing dependency entry: name='${name}' source='${source}'"
-            
+                type=$(echo "$dep" | jq -r '.type')
+
+                echo "⤴️ Processing dependency entry: name='${name}' source='${source}' type='${type}'"
+
+                dep_version=""
+
                 if [[ "$source" == "$REPO_NAME" ]]; then
-                  version="$VERSION"
-                  echo "   ↪ Source '${source}' is current repo → using local version: ${version}"
+                  dep_version="$VERSION"
+                  echo "   ↪ Source '$source' is current repo → using local version: $dep_version"
                 else
                   found_version=false
                   for branch in "$BRANCH_NAME" master main; do
-                    echo "   ↪ Trying to fetch version from https://api.github.com/repos/${GITHUB_ACTOR}/${source}/contents/pom.xml?ref=${branch}"
-                    
-                    response=$(curl -s -w "%{http_code}" \
-                      -H "Authorization: token $GH_TOKEN" \
+                    echo "   ↪ Trying branch '$branch' of $source"
+
+                    curl -s -H "Authorization: token $GH_TOKEN" \
                       -H "Accept: application/vnd.github.v3.raw" \
-                      -o temp_pom.xml \
-                      "https://api.github.com/repos/${GITHUB_ACTOR}/${source}/contents/pom.xml?ref=${branch}")
-            
-                    if [[ "$response" == "200" && -s temp_pom.xml ]]; then
-                      version=$(grep -m1 '<version>' temp_pom.xml | sed -E 's/.*<version>(.*)<\/version>.*/\1/')
-                      echo "     ✅ Found version='${version}' in ${source} (${branch})"
+                      -o /tmp/_pom.xml \
+                      "https://api.github.com/repos/${GITHUB_ACTOR}/$source/contents/pom.xml?ref=$branch"
+
+                    if [[ -s /tmp/_pom.xml ]]; then
+                      dep_version=$(xmlstarlet sel -t -v "/_:project/_:version" /tmp/_pom.xml)
+                      echo "     ✅ Found version='$dep_version' for $name from $source ($branch)"
                       found_version=true
                       break
-                    else
-                      echo "     ⚠️ Not found on branch '${branch}' (http ${response})"
                     fi
                   done
-            
-                  if [ "$found_version" = false ]; then
-                    echo "⚠️ Could not fetch version from repo '${source}' — skipping ${name}"
+
+                  if [[ "$found_version" = false ]]; then
+                    echo "     ⚠️ Could not fetch version for $name from $source — skipping"
                     continue
                   fi
                 fi
-            
-                # Update property or parent dependency
-                if [[ "$name" == "parent" ]]; then
-                  echo "   ↪ Updating dependency artifactId 'parent' → ${version}"
-                  mvn versions:update-parent -DparentVersion="[${version}]" -B
+
+                if [[ "$type" == "parent" ]]; then
+                  echo "   ↪ Updating parent version to $dep_version"
+                  mvn versions:update-parent -DparentVersion="[${dep_version}]" -B
+                elif [[ "$type" == "property" ]]; then
+                  echo "   ↪ Updating property <$name> to $dep_version"
+                  mvn versions:set-property -Dproperty="${name}" -DnewVersion="${dep_version}" -B
                 else
-                  echo "   ↪ Updating property <${name}> → ${version}"
-                  mvn versions:set-property -Dproperty="${name}" -DnewVersion="${version}" -B
+                  echo "   ⚠️ Unknown type '$type' for $name — skipping"
                 fi
               done
             else
               echo "⚠️ No dependencies.json found in $repo — skipping dependency updates"
             fi
 
-            # Extract current version safely for patch increment (use xmlstarlet first)
             current_version=$(xmlstarlet sel -t -v "/_:project/_:version" pom.xml 2>/dev/null || echo "")
             if [[ -z "$current_version" ]]; then
               current_version=$(mvn help:evaluate -Dexpression=project.version -q -DforceStdout 2>/dev/null || echo "")
@@ -175,7 +166,6 @@ jobs:
 
             echo "Current version in $repo: $current_version"
 
-            # Compute next patch version
             base_version=$(echo "$current_version" | sed 's/-SNAPSHOT//')
             major=$(echo "$base_version" | cut -d. -f1)
             minor=$(echo "$base_version" | cut -d. -f2)
@@ -190,7 +180,6 @@ jobs:
             echo "🔧 Bumping $repo to $next_version"
             mvn versions:set -DnewVersion=$next_version -DgenerateBackupPoms=false
 
-            # Commit & push changes if any
             git add pom.xml
             if git diff --cached --quiet; then
               echo "No changes to commit in $repo"
@@ -201,7 +190,6 @@ jobs:
 
             cd ..
 
-            # Trigger workflow_dispatch for dependent repo
             echo "Triggering workflow_dispatch for $repo"
             curl -s -X POST \
               -H "Accept: application/vnd.github+json" \
@@ -210,6 +198,5 @@ jobs:
               -d "{\"ref\":\"$BRANCH_NAME\"}" \
               || echo "⚠️ workflow_dispatch failed for $repo"
 
-            # Clean up cloned repo
             rm -rf $repo
           done
