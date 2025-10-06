@@ -123,8 +123,8 @@ jobs:
                 # Try fetch the source repo pom on the same branch; fallback to master/main if missing
                 src_version=""
                 for b in "$BRANCH_NAME" master main; do
-                  echo "   ↪ Trying to fetch version from https://raw.githubusercontent.com/chetanpatil018/${dep_source}/${b}/pom.xml"
-                  http_status=$(curl -s -o /tmp/_pom.xml -w "%{http_code}" "https://raw.githubusercontent.com/chetanpatil018/${dep_source}/${b}/pom.xml" || echo "000")
+                  echo "   ↪ Trying to fetch version from https://github.com/chetanpatil018/$dep_source/blob/$BRANCH_NAME/pom.xml?raw=true"
+                  http_status=$(curl -s -o /tmp/_pom.xml -w "%{http_code}" "https://github.com/chetanpatil018/$dep_source/blob/$BRANCH_NAME/pom.xml?raw=true" || echo "000")
                   if [[ "$http_status" == "200" && -s /tmp/_pom.xml ]]; then
                     src_version=$(xmlstarlet sel -t -v "/_:project/_:version" /tmp/_pom.xml 2>/dev/null || echo "")
                     echo "     ↪ Found pom on branch '$b' (http $http_status) → version='$src_version'"
