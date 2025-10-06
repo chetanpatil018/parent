@@ -100,63 +100,64 @@ jobs:
               continue
             fi
 
-            # Update parent version in pom.xml (this is correct)
+            # Update parent version in pom.xml
             echo "🔧 Updating parent version in $repo to $VERSION"
             xmlstarlet ed -L -u "/_:project/_:parent/_:version" -v "$VERSION" pom.xml || echo "⚠️ Failed to update parent version"
-
-            # --- IMPORTANT FIX: read the dependent's own dependencies.json (not ../dependencies.json) ---
-            if [[ ! -f dependencies.json ]]; then
-              echo "⚠️ No dependencies.json in $repo — nothing to update here (skipping dependency updates)"
-            else
-              # Iterate each dependency object safely (one JSON object per line)
-              jq -r '.dependencies[]? | "\(.name)|\(.source)"' dependencies.json | while IFS="|" read -r dep_name dep_source; do
-
-                if [[ -z "$dep_name" || -z "$dep_source" || "$dep_name" == "null" || "$dep_source" == "null" ]]; then
-                  echo "⚠️ Skipping invalid dependency entry: $dep_entry"
-                  continue
-                fi
-
-                echo "⤴️ Processing dependency entry: name='$dep_name' source='$dep_source'"
-
-                # Determine version for this dependency source
-                src_version=""
-                
-                if [[ "$dep_source" == "${GITHUB_REPOSITORY##*/}" ]]; then
-                  # If the dependency source is the current repo, reuse current VERSION
-                  echo "   ↪ Source '$dep_source' is current repo → using local version: $VERSION"
-                  src_version="$VERSION"
+            
+            # 🔽 INSERT your GitHub API–based dependency update block here
+            if [[ -f dependencies.json ]]; then
+              echo "🔍 Updating dependencies from dependencies.json using GitHub API"
+              
+              REPO_NAME="${GITHUB_REPOSITORY##*/}"
+              
+              # Loop through each dependency
+              for dep in $(jq -c '.dependencies[]' dependencies.json); do
+                name=$(echo "$dep" | jq -r '.name')
+                source=$(echo "$dep" | jq -r '.source')
+            
+                echo "⤴️ Processing dependency entry: name='${name}' source='${source}'"
+            
+                if [[ "$source" == "$REPO_NAME" ]]; then
+                  version="$VERSION"
+                  echo "   ↪ Source '${source}' is current repo → using local version: ${version}"
                 else
-                  # Otherwise fetch from GitHub (try same branch, fallback to master/main)
-                  for b in "$BRANCH_NAME" master main; do
-                    echo "   ↪ Trying to fetch version from https://github.com/chetanpatil018/$dep_source/blob/$b/pom.xml?raw=true"
-                    http_status=$(curl -s -o /tmp/_pom.xml -w "%{http_code}" "https://github.com/chetanpatil018/$dep_source/blob/$b/pom.xml?raw=true" || echo "000")
-                    if [[ "$http_status" == "200" && -s /tmp/_pom.xml ]]; then
-                      src_version=$(xmlstarlet sel -t -v "/_:project/_:version" /tmp/_pom.xml 2>/dev/null || echo "")
-                      echo "     ↪ Found pom on branch '$b' (http $http_status) → version='$src_version'"
+                  found_version=false
+                  for branch in "$BRANCH_NAME" master main; do
+                    echo "   ↪ Trying to fetch version from https://api.github.com/repos/${GITHUB_ACTOR}/${source}/contents/pom.xml?ref=${branch}"
+                    
+                    response=$(curl -s -w "%{http_code}" \
+                      -H "Authorization: token $GH_TOKEN" \
+                      -H "Accept: application/vnd.github.v3.raw" \
+                      -o temp_pom.xml \
+                      "https://api.github.com/repos/${GITHUB_ACTOR}/${source}/contents/pom.xml?ref=${branch}")
+            
+                    if [[ "$response" == "200" && -s temp_pom.xml ]]; then
+                      version=$(grep -m1 '<version>' temp_pom.xml | sed -E 's/.*<version>(.*)<\/version>.*/\1/')
+                      echo "     ✅ Found version='${version}' in ${source} (${branch})"
+                      found_version=true
                       break
                     else
-                      echo "     ↪ Not found on branch '$b' (http $http_status)"
+                      echo "     ⚠️ Not found on branch '${branch}' (http ${response})"
                     fi
                   done
+            
+                  if [ "$found_version" = false ]; then
+                    echo "⚠️ Could not fetch version from repo '${source}' — skipping ${name}"
+                    continue
+                  fi
                 fi
-
-                if [[ -z "$src_version" ]]; then
-                  echo "⚠️ Could not fetch version from repo '$dep_source' on branches [$BRANCH_NAME, master, main] — skipping $dep_name"
-                  continue
-                fi
-
-                # Update property or dependency in the dependent's pom
-                if [[ "$dep_name" == *"."* ]]; then
-                  # Use local-name() so dotted property names (e.g., common.version) are handled properly even with namespaces
-                  echo "   ↪ Updating property <$dep_name> → $src_version"
-                  xmlstarlet ed -L -u "/_:project/_:properties/*[local-name()='$dep_name']" -v "$src_version" pom.xml \
-                    || echo "⚠️ Failed to update property $dep_name"
+            
+                # Update property or parent dependency
+                if [[ "$name" == "parent" ]]; then
+                  echo "   ↪ Updating dependency artifactId 'parent' → ${version}"
+                  mvn versions:update-parent -DparentVersion="[${version}]" -B
                 else
-                  echo "   ↪ Updating dependency artifactId '$dep_name' → $src_version"
-                  xmlstarlet ed -L -u "//_:dependency[_:artifactId='$dep_name']/_:version" -v "$src_version" pom.xml \
-                    || echo "⚠️ Failed to update dependency $dep_name"
+                  echo "   ↪ Updating property <${name}> → ${version}"
+                  mvn versions:set-property -Dproperty="${name}" -DnewVersion="${version}" -B
                 fi
               done
+            else
+              echo "⚠️ No dependencies.json found in $repo — skipping dependency updates"
             fi
 
             # Extract current version safely for patch increment (use xmlstarlet first)
